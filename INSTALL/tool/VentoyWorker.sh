@@ -134,20 +134,9 @@ if [ "$MODE" = "list" ]; then
     exit 0
 fi
 
-#check mountpoint
-check_umount_disk "$DISK"
-
-if grep "$DISK" /proc/mounts; then
-    vterr "$DISK is already mounted, please umount it first!"
+# Check the selected disk and all related block devices before touching it.
+if ! ventoy_check_disk_busy "$DISK"; then
     exit 1
-fi
-
-#check swap partition
-if swapon --help 2>&1 | grep -q '^ -s,'; then
-    if swapon -s | grep -q "^${DISK}[0-9]"; then
-        vterr "$DISK is used as swap, please swapoff it first!"
-        exit 1
-    fi
 fi
 
 #check access
@@ -273,8 +262,17 @@ if [ "$MODE" = "install" -a -z "$NONDESTRUCTIVE" ]; then
         fi
     fi
 
+    if ! ventoy_check_disk_busy "$DISK"; then
+        exit 1
+    fi
+
     if [ $disk_sector_num -le $VENTOY_SECTOR_NUM ]; then
         vterr "No enough space in disk $DISK"
+        exit 1
+    fi
+
+    # Recheck immediately before the first destructive write.
+    if ! ventoy_check_disk_busy "$DISK"; then
         exit 1
     fi
 
@@ -571,6 +569,10 @@ else
         if [ "$Answer" != "Y" ]; then
             exit 0
         fi
+    fi
+
+    if ! ventoy_check_disk_busy "$DISK"; then
+        exit 1
     fi
 
     PART2=$(get_disk_part_name $DISK 2)
