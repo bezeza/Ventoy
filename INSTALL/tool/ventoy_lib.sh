@@ -101,14 +101,140 @@ get_disk_part_name() {
     fi
 }
 
-check_umount_disk() {
-    DiskOrPart="$1"
-    grep "^${DiskOrPart}" /proc/mounts | while read mtline; do
-        mtpnt=$(echo $mtline | awk '{print $2}')
-        vtdebug "Trying to umount $mtpnt ..."
-        umount $mtpnt >/dev/null 2>&1
+# Return the selected block device and all block devices that depend on it,
+# including partitions, holders (for example dm/LVM and MD RAID), and slaves.
+# The sysfs root can be overridden by tests; production uses /sys/class/block.
+ventoy_get_related_block_devices() {
+    vgr_disk=$1
+    vgr_sysfs=${VENTOY_SYSFS_ROOT:-/sys/class/block}
+    vgr_name=${vgr_disk#/dev/}
+
+    if [ -z "$vgr_name" ] || [ ! -e "$vgr_sysfs/$vgr_name/dev" ]; then
+        return 1
+    fi
+
+    vgr_pending=$vgr_name
+    vgr_seen=""
+
+    while [ -n "$vgr_pending" ]; do
+        vgr_current=${vgr_pending%% *}
+        if [ "$vgr_pending" = "$vgr_current" ]; then
+            vgr_pending=""
+        else
+            vgr_pending=${vgr_pending#* }
+        fi
+
+        case " $vgr_seen " in
+            *" $vgr_current "*) continue ;;
+        esac
+        vgr_seen="${vgr_seen}${vgr_seen:+ }$vgr_current"
+
+        vgr_current_path=$(readlink -f "$vgr_sysfs/$vgr_current" 2>/dev/null)
+        if [ -z "$vgr_current_path" ]; then
+            return 1
+        fi
+
+        # Add partitions belonging to this block device. Comparing resolved
+        # sysfs paths avoids false prefix matches such as sda vs sdaa.
+        for vgr_candidate in "$vgr_sysfs"/*; do
+            [ -e "$vgr_candidate/partition" ] || continue
+            vgr_candidate_path=$(readlink -f "$vgr_candidate" 2>/dev/null)
+            case "$vgr_candidate_path" in
+                "$vgr_current_path"/*)
+                    vgr_candidate_name=${vgr_candidate##*/}
+                    case " $vgr_seen $vgr_pending " in
+                        *" $vgr_candidate_name "*) ;;
+                        *) vgr_pending="${vgr_pending}${vgr_pending:+ }$vgr_candidate_name" ;;
+                    esac
+                    ;;
+            esac
+        done
+
+        # Walk both directions of the block-device dependency graph. This
+        # catches active LVM/dm-crypt and MD RAID users of the selected disk.
+        for vgr_relation in holders slaves; do
+            for vgr_link in "$vgr_sysfs/$vgr_current/$vgr_relation"/*; do
+                [ -e "$vgr_link" ] || continue
+                vgr_link_name=${vgr_link##*/}
+                case " $vgr_seen $vgr_pending " in
+                    *" $vgr_link_name "*) ;;
+                    *) vgr_pending="${vgr_pending}${vgr_pending:+ }$vgr_link_name" ;;
+                esac
+            done
+        done
     done
+
+    printf '%s\n' "$vgr_seen"
 }
+
+# Refuse to operate on a disk that is mounted or used by active swap, either
+# directly or through a partition/device-mapper/RAID dependency.
+ventoy_check_disk_busy() {
+    vcdb_disk=$1
+    vcdb_sysfs=${VENTOY_SYSFS_ROOT:-/sys/class/block}
+    vcdb_mountinfo=${VENTOY_PROC_MOUNTINFO:-/proc/self/mountinfo}
+    vcdb_swaps=${VENTOY_PROC_SWAPS:-/proc/swaps}
+
+    vcdb_related=$(ventoy_get_related_block_devices "$vcdb_disk") || {
+        vterr "Unable to inspect block-device dependencies for $vcdb_disk. Refusing to continue."
+        return 1
+    }
+
+    if [ ! -r "$vcdb_mountinfo" ]; then
+        vterr "Unable to read $vcdb_mountinfo. Refusing to write to $vcdb_disk."
+        return 1
+    fi
+
+    for vcdb_name in $vcdb_related; do
+        vcdb_dev=$(cat "$vcdb_sysfs/$vcdb_name/dev" 2>/dev/null)
+        [ -n "$vcdb_dev" ] || continue
+        vcdb_mount=$(awk -v dev="$vcdb_dev" '$3 == dev { print $5; exit }' "$vcdb_mountinfo")
+        if [ -n "$vcdb_mount" ]; then
+            vcdb_mount=$(printf '%b' "$vcdb_mount")
+            vterr "$vcdb_disk is in use: /dev/$vcdb_name is mounted at $vcdb_mount. Unmount it first."
+            return 1
+        fi
+    done
+
+    if [ ! -r "$vcdb_swaps" ]; then
+        vterr "Unable to read $vcdb_swaps. Refusing to write to $vcdb_disk."
+        return 1
+    fi
+
+    # /proc/swaps has a header followed by one active swap entry per line.
+    {
+        IFS= read -r vcdb_header || vcdb_header=""
+        while IFS=' ' read -r vcdb_swap vcdb_type vcdb_size vcdb_used vcdb_priority; do
+            [ -n "$vcdb_swap" ] || continue
+            vcdb_swap=$(printf '%b' "$vcdb_swap")
+            vcdb_swap_dev=""
+
+            case "$vcdb_swap" in
+                /dev/*)
+                    vcdb_real=$(readlink -f "$vcdb_swap" 2>/dev/null)
+                    if [ -n "$vcdb_real" ]; then
+                        vcdb_swap_name=${vcdb_real#/dev/}
+                        vcdb_swap_dev=$(cat "$vcdb_sysfs/$vcdb_swap_name/dev" 2>/dev/null)
+                    fi
+                    if [ -z "$vcdb_swap_dev" ]; then
+                        vterr "Unable to identify active swap device $vcdb_swap. Refusing to continue."
+                        returnBBÎÂ
+BÈÝØ\[\È\HX\YÝYÚZ\ÛÛZ[[È[\Þ\Ý[KÈY[[Ø[ÝY[YHHXÚÚ[È]XÙKZ[ÛÜÙYYÛÛ[X[][[Ù]Û[NÈ[ÙÜÝØ\Ù]I
+[[[[ÈPRRSK]\Ù]ÙÜÝØ\Ù]Û[ÙY[	Ì\	ÊBBYÈ^ÙÜÝØ\Ù]NÈ[\[XHÈY[YHH[\Þ\Ý[HÛÛZ[[ÈXÝ]HÝØ\[H	ÙÜÝØ\[Ý[[[Ü\ØXHÝØ\YÜHÛÛ[Z[Ë]\BBÎÂ\ØXÂÜÙÛ[YH[	ÙÜ[]YÈÂÙÙ]I
+Ø]ÙÜÞ\ÙËÉÙÛ[YKÙ]Ù]Û[
+BYÈ[ÙÙ]H	ÈÙÙ]HÙÜÝØ\Ù]NÈ[\ÙÙ\ÚÈ\È[\ÙH\ÈÝØ\ÝYÚ	ÙÜÝØ\[ÝØ\Ù\Ý]\BBÛBÛBHÙÜÝØ\È]\BÈ[[Ý[ÛHHÙ[XÝY]XÙH[]ÈXÝX[\][ÛË]XÙK[[X\ÈX]Ú[È][ÈY^ÛÛ\Ú[ÛÈ
+Ü^[\HÙ]ÜÙHX]Ú[ÈÙ]ÜÙXLJKÚXÚ×Ý[[Ý[Ù\ÚÊ
+HÂ\ÚÓÜ\HHYÜÞ\ÙÏIÕSÖWÔÖTÑ×ÔÓÕKÜÞ\ËØÛ\ÜËØØÚßBYÛ[Ý[[ÏIÕSÖWÔÐ×ÓSÕSSÎKÜØËÜÙ[Û[Ý[[ßBYÛ[YOIÑ\ÚÓÜ\ËÙ]ßBÈYHYÜÞ\ÙËÉYÛ[YKÙ]H]\YÙ\Ú×Ü]I
+XY[ÈYYÜÞ\ÙËÉYÛ[YHÙ]Û[
+H]\ÜYÙ]XÙH[YÛ[YHÈÂYÙ]I
+Ø]YÜÞ\ÙËÉYÙ]XÙKÙ]Ù]Û[
+BÈ[YÙ]HÛÛ[YB]ÚÈ]]HYÙ]	ÉÈOH]È[	HIÈYÛ[Ý[[ÈÙ]Û[ÛHÚ[HQÏHXY\YÛ[Ý[ÈÂÈ[YÛ[Ý[HÛÛ[YBYÛ[Ý[I
+[	ÉXÈYÛ[Ý[BXYÈZ[ÈÈ[[Ý[	YÛ[Ý[[[Ý[YÛ[Ý[Ù]Û[BÛBÜYØØ[Y]H[YÜÞ\ÙÈÊÈÂÈYHYØØ[Y]KÜ\][ÛHÛÛ[YBYØØ[Y]WÜ]I
+XY[ÈYYØØ[Y]HÙ]Û[
+BØ\ÙHYØØ[Y]WÜ][YÙ\Ú×Ü]ÊBYÙ]XÙOIÝYØØ[Y]HÈÊßBYÙ]I
+Ø]YÜÞ\ÙËÉYÙ]XÙKÙ]Ù]Û[
+BÈ[YÙ]HÛÛ[YB]ÚÈ]]HYÙ]	ÉÈOH]È[	HIÈYÛ[Ý[[ÈÙ]Û[ÎÂ\ØXÂÛHÚ[HQÏHXY\YÛ[Ý[ÈÂÈ[YÛ[Ý[HÛÛ[YBYÛ[Ý[I
+[	ÉXÈYÛ[Ý[BXYÈZ[ÈÈ[[Ý[	YÛ[Ý[[[Ý[YÛ[Ý[Ù]Û[BÛBB
 
 get_ventoy_version_from_cfg() {
     if grep -q 'set.*VENTOY_VERSION=' $1; then
